@@ -22,6 +22,8 @@
 
 #include <vector>
 
+#define WM_DEFAULTCHUNKING    // define if you want chunking by default (can be overriden with constructor parameter)
+// #define WM_NODEBUG         // define if you want smaller/faster code at the cost of no debugging messages
 // #define WM_MDNS            // includes MDNS, also set MDNS with sethostname
 // #define WM_FIXERASECONFIG  // use erase flash fix
 // #define WM_ERASE_NVS       // esp32 erase(true) will erase NVS 
@@ -194,6 +196,8 @@
 #define WFM_LABEL_AFTER 2
 #define WFM_NO_LABEL 0
 #define WFM_LABEL_DEFAULT 1
+
+class Page;
 
 class WiFiManagerParameter {
   public:
@@ -507,11 +511,47 @@ class WiFiManager
     std::unique_ptr<DNSServer>        dnsServer;
 
     #if defined(ESP32) && defined(WM_WEBSERVERSHIM)
-        using WM_WebServer = WebServer;
+        using _WM_WebServer = WebServer;
     #else
-        using WM_WebServer = ESP8266WebServer;
+        using _WM_WebServer = ESP8266WebServer;
     #endif
-    
+
+    #ifdef WM_NODEBUG
+    using WM_WebServer = _WM_WebServer;
+    #else
+    // When debugging is enabled, class WM_WebServer is a wrapper for WebServer/ESP8266WebServer (a.k.a. _WM_WebServer) that displays the size of content being sent.
+    // This was introduced for comparison of web server content-sending calls "with chunking" and "without chunking".
+    // The class WM_WebServer inherits from class _WM_WebServer using "protected" rather than the more usual "public" because we want to be sure that we are not
+    // calling any methods of class _WM_WebServer that send content without them being wrapped by a method of class WM_WebServer. The methods of class _WM_WebServer
+    // that we use but do not chose to wrap are explicitly made accessible with "using".
+    class WM_WebServer: protected _WM_WebServer {
+    public:
+      WM_WebServer(uint16_t port, std::function<void (wm_debuglevel_t, const String&, const String&)> debug):
+        _WM_WebServer(port), debug(debug) {
+      }
+      void send(uint16_t code, const String& contentType, const String& content);
+      void send_P(uint16_t code, PGM_P content_type, PGM_P content, size_t contentLength);
+      void sendHeader(const String &name, const String &value, bool first = false);
+      void sendContent(const char *content, size_t contentLength);
+      void sendContent(const String& content);
+      void setContentLength(const size_t contentLength);
+      #if ESP8266
+      void chunkedResponseFinalize();
+      #endif
+      using _WM_WebServer::on, _WM_WebServer::onNotFound;
+      using _WM_WebServer::begin, _WM_WebServer::stop;
+      using _WM_WebServer::handleClient;
+      using _WM_WebServer::authenticate, _WM_WebServer::requestAuthentication;
+      using _WM_WebServer::hasArg, _WM_WebServer::arg, _WM_WebServer::args, _WM_WebServer::argName;
+      using _WM_WebServer::method, _WM_WebServer::uri, _WM_WebServer::client, _WM_WebServer::hostHeader;
+      using _WM_WebServer::upload;
+
+    private:
+      std::function<void (wm_debuglevel_t, const String&, const String&)> debug;
+      void _sendContent(const String& content) { _WM_WebServer::sendContent(content); }
+    };
+    #endif // WM_NODEBUG
+
     std::unique_ptr<WM_WebServer> server;
 
   protected:
@@ -674,6 +714,7 @@ public:
     void          handleNotFound();
 protected:
     void          HTTPSend(const String &content);
+    void          HTTPSend(Page &page);
     void          handleRoot();
     void          handleWifi(boolean scan);
     void          handleWifiSave();
@@ -755,11 +796,12 @@ protected:
     #endif
 
     // output helpers
-    String        getParamOut();
+    // For those strings X that can be very large, we use a sendX method rather than a getX method.
+    void          sendParamOut(Page& page);
     String        getIpForm(String id, String title, String value);
-    String        getScanItemOut();
-    String        getStaticOut();
-    String        getHTTPHead(String title, String classes = "");
+    void          sendScanItemOut(Page& page);
+    void          sendStaticOut(Page& page);
+    void          sendHTTPHead(Page& page, String title, String classes = "");
     String        getHTTPEnd();
     String        getMenuOut();
     //helpers
@@ -767,7 +809,7 @@ protected:
     String        toStringIp(IPAddress ip);
     boolean       validApPassword();
     String        encryptionTypeStr(uint8_t authmode);
-    void          reportStatus(String &page);
+    void          reportStatus(Page& page);
     String        getInfoData(String id);
 
     // flags
@@ -831,9 +873,11 @@ protected:
     void        DEBUG_WM(wm_debuglevel_t level,Generic text);
     template <typename Generic, typename Genericb>
     void        DEBUG_WM(Generic text,Genericb textb);
+public: // for class Page
     template <typename Generic, typename Genericb>
     void        DEBUG_WM(wm_debuglevel_t level, Generic text,Genericb textb);
 
+protected:
     // callbacks
     // @todo use cb list (vector) maybe event ids, allow no return value
     std::function<void(WiFiManager*)> _apcallback;

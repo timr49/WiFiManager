@@ -11,6 +11,7 @@
  */
 
 #include "WiFiManager.h"
+#include "page.h"
 
 #if defined(ESP8266) || defined(ESP32)
 
@@ -627,7 +628,13 @@ void WiFiManager::setupHTTPServer(){
     #endif
   }
 
+  #ifdef WM_DEBUG_LEVEL
+  server.reset(new WM_WebServer(_httpPort, [this](wm_debuglevel_t level, const String& string1, const String& string2) {
+    DEBUG_WM(level, string1, string2);
+  }));
+  #else
   server.reset(new WM_WebServer(_httpPort));
+  #endif
   // This is not the safest way to reset the webserver, it can cause crashes on callbacks initilized before this and since its a shared pointer...
 
   if ( _webservercallback != NULL) {
@@ -1111,6 +1118,7 @@ bool WiFiManager::wifiConnectNew(String ssid, String pass,bool connect){
   WiFi_enableSTA(true,storeSTAmode); // storeSTAmode will also toggle STA on in default opmode (persistent) if true (default)
   WiFi.persistent(true);
   ret = WiFi.begin(ssid.c_str(), pass.c_str(), 0, NULL, connect);
+
   WiFi.persistent(false);
   #ifdef WM_DEBUG_LEVEL
   if(!ret) DEBUG_WM(WM_DEBUG_ERROR,F("[ERROR] wifi begin failed"));
@@ -1272,29 +1280,23 @@ void WiFiManager::startWPS() {
 }
 #endif
 
-String WiFiManager::getHTTPHead(String title, String classes){
-  String page;
-  page += FPSTR(HTTP_HEAD_START);
-  page.replace(FPSTR(T_v), title);
+void WiFiManager::sendHTTPHead(Page& page, String title, String classes){
+  page.replace(FPSTR(HTTP_HEAD_START), FPSTR(T_v), title);
   page += FPSTR(HTTP_SCRIPT);
   page += FPSTR(HTTP_STYLE);
   page += _customHeadElement;
 
-  String p = FPSTR(HTTP_HEAD_END);
   if (_bodyClass != "") {
     if (classes != "") {
       classes += " ";  // add spacing, if necessary
     }
     classes += _bodyClass;  // add class str
   }
-  p.replace(FPSTR(T_c), classes);
-  page += p;
+  page.replace(FPSTR(HTTP_HEAD_END), FPSTR(T_c), classes);
 
   if (_customBodyHeader) {
     page += _customBodyHeader;
   }
-
-  return page;
 }
 
 String WiFiManager::getHTTPEnd() {
@@ -1309,6 +1311,11 @@ String WiFiManager::getHTTPEnd() {
 
 void WiFiManager::HTTPSend(const String &content){
   server->send(200, FPSTR(HTTP_HEAD_CT), content);
+}
+
+// Using this helps to reduce code changes when coverting WiFiManager to use chunking.
+void WiFiManager::HTTPSend(Page &page) {
+  page.end();
 }
 
 /** 
@@ -1347,11 +1354,13 @@ void WiFiManager::handleRoot() {
   #endif
   if (captivePortal()) return; // If captive portal redirect instead of displaying the page
   handleRequest();
-  String page = getHTTPHead(_title, FPSTR(C_root)); // @token options @todo replace options with title
-  String str  = FPSTR(HTTP_ROOT_MAIN); // @todo custom title
-  str.replace(FPSTR(T_t),_title);
-  str.replace(FPSTR(T_v),configPortalActive ? _apName : (getWiFiHostname() + " - " + WiFi.localIP().toString())); // use ip if ap is not active for heading @todo use hostname?
-  page += str;
+  PAGE(page);
+  sendHTTPHead(page, _title, FPSTR(C_root)); // @token options @todo replace options with title
+  Page::ReplacementList replacements;
+  replacements += Page::Replacement(FPSTR(T_t), _title);
+  replacements += Page::Replacement(FPSTR(T_v), configPortalActive ? _apName : (getWiFiHostname() + " - " + WiFi.localIP().toString())); // use ip if ap is not active for heading @todo use hostname?
+  // @todo custom title
+  page.replace(FPSTR(HTTP_ROOT_MAIN), replacements);
   page += FPSTR(HTTP_PORTAL_OPTIONS);
   page += getMenuOut();
   reportStatus(page);
@@ -1372,40 +1381,28 @@ void WiFiManager::handleWifi(boolean scan) {
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP Wifi"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titlewifi), FPSTR(C_wifi)); // @token titlewifi
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titlewifi), FPSTR(C_wifi)); // @token titlewifi
   if (scan) {
     #ifdef WM_DEBUG_LEVEL
     // DEBUG_WM(WM_DEBUG_DEV,"refresh flag:",server->hasArg(F("refresh")));
     #endif
     WiFi_scanNetworks(server->hasArg(F("refresh")),false); //wifiscan, force if arg refresh
-    page += getScanItemOut();
-  }
-  String pitem = "";
-
-  pitem = FPSTR(HTTP_FORM_START);
-  pitem.replace(FPSTR(T_v), F("wifisave")); // set form action
-  page += pitem;
-
-  pitem = FPSTR(HTTP_FORM_WIFI);
-  pitem.replace(FPSTR(T_v), WiFi_SSID());
-
-  if(_showPassword){
-    pitem.replace(FPSTR(T_p), WiFi_psk());
-  }
-  else if(WiFi_psk() != ""){
-    pitem.replace(FPSTR(T_p),FPSTR(S_passph));    
-  }
-  else {
-    pitem.replace(FPSTR(T_p),"");    
+    sendScanItemOut(page);
   }
 
-  page += pitem;
+  page.replace(FPSTR(HTTP_FORM_START), FPSTR(T_v), F("wifisave")); // set form action
+  
+  Page::ReplacementList replacements;
+  replacements += Page::Replacement(FPSTR(T_v), WiFi_SSID());
+  replacements += Page::Replacement(FPSTR(T_p), _showPassword ? WiFi_psk() : WiFi_psk() != "" ? String(FPSTR(S_passph)) : "");
+  page.replace(FPSTR(HTTP_FORM_WIFI), replacements);
 
-  page += getStaticOut();
+  sendStaticOut(page);
   page += FPSTR(HTTP_FORM_WIFI_END);
   if(_paramsInWifi && _paramsCount>0){
     page += FPSTR(HTTP_FORM_PARAM_HEAD);
-    page += getParamOut();
+    sendParamOut(page);
   }
   page += FPSTR(HTTP_FORM_END);
   page += FPSTR(HTTP_SCAN_LINK);
@@ -1428,15 +1425,12 @@ void WiFiManager::handleParam(){
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP Param"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titleparam), FPSTR(C_param)); // @token titlewifi
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titleparam), FPSTR(C_param)); // @token titlewifi
 
-  String pitem = "";
+  page.replace(FPSTR(HTTP_FORM_START), FPSTR(T_v), F("paramsave"));
 
-  pitem = FPSTR(HTTP_FORM_START);
-  pitem.replace(FPSTR(T_v), F("paramsave"));
-  page += pitem;
-
-  page += getParamOut();
+  sendParamOut(page);
   page += FPSTR(HTTP_FORM_END);
   if(_showBack) page += FPSTR(HTTP_BACKBTN);
   reportStatus(page);
@@ -1568,9 +1562,10 @@ bool WiFiManager::WiFi_scanNetworks(bool force,bool async){
     return false;
 }
 
-String WiFiManager::WiFiManager::getScanItemOut(){
-    String page;
-
+void WiFiManager::sendScanItemOut(Page& page){
+  #ifdef WM_DEBUG_LEVEL
+  DEBUG_WM(WM_DEBUG_DEV,F("<- sendScanItemOut"));
+  #endif
     if(!_numNetworks) WiFi_scanNetworks(); // scan in case this gets called before any scans
 
     int n = _numNetworks;
@@ -1625,6 +1620,7 @@ String WiFiManager::WiFiManager::getScanItemOut(){
       }
 
       // token precheck, to speed up replacements on large ap lists
+      // HTTP_ITEM is less than 100 characters so we don't attempt to replace and chunk at the same time.
       String HTTP_ITEM_STR = FPSTR(HTTP_ITEM);
 
       // toggle icons with percentage
@@ -1684,11 +1680,10 @@ String WiFiManager::WiFiManager::getScanItemOut(){
       }
       page += FPSTR(HTTP_BR);
     }
-
-    return page;
 }
 
 String WiFiManager::getIpForm(String id, String title, String value){
+    // HTTP_FORM_LABEL is less than 50 characters so we don't attempt to replace and chunk at the same time.
     String item = FPSTR(HTTP_FORM_LABEL);
     item += FPSTR(HTTP_FORM_PARAM);
     item.replace(FPSTR(T_i), id);
@@ -1702,8 +1697,8 @@ String WiFiManager::getIpForm(String id, String title, String value){
     return item;  
 }
 
-String WiFiManager::getStaticOut(){
-  String page;
+void WiFiManager::sendStaticOut(Page& page){
+  const unsigned int length = page.length();
   if ((_staShowStaticFields || _sta_static_ip) && _staShowStaticFields>=0) {
     #ifdef WM_DEBUG_LEVEL
     DEBUG_WM(WM_DEBUG_DEV,F("_staShowStaticFields"));
@@ -1722,20 +1717,16 @@ String WiFiManager::getStaticOut(){
     page += getIpForm(FPSTR(S_dns),FPSTR(S_staticdns),(_sta_static_dns ? _sta_static_dns.toString() : "")); // @token dns
   }
 
-  if(page!="") page += FPSTR(HTTP_BR); // @todo remove these, use css
-
-  return page;
+  if(page.length() > length) page += FPSTR(HTTP_BR); // @todo remove these, use css
 }
 
-String WiFiManager::getParamOut(){
-  String page;
-
+void WiFiManager::sendParamOut(Page& page){
   #ifdef WM_DEBUG_LEVEL
-  DEBUG_WM(WM_DEBUG_DEV,F("getParamOut"),_paramsCount);
+  DEBUG_WM(WM_DEBUG_DEV,F("sendParamOut"),_paramsCount);
   #endif
 
   if(_paramsCount > 0){
-
+    // HTTP_FORM_LABEL and HTTP_FORM_PARAM are short strings.
     String HTTP_PARAM_temp = FPSTR(HTTP_FORM_LABEL);
     HTTP_PARAM_temp += FPSTR(HTTP_FORM_PARAM);
     bool tok_I = HTTP_PARAM_temp.indexOf(FPSTR(T_I)) > 0;
@@ -1746,6 +1737,7 @@ String WiFiManager::getParamOut(){
     bool tok_l = HTTP_PARAM_temp.indexOf(FPSTR(T_l)) > 0;
     bool tok_v = HTTP_PARAM_temp.indexOf(FPSTR(T_v)) > 0;
     bool tok_c = HTTP_PARAM_temp.indexOf(FPSTR(T_c)) > 0;
+    HTTP_PARAM_temp.reserve(0); // release string space
 
     char valLength[5];
 
@@ -1756,7 +1748,7 @@ String WiFiManager::getParamOut(){
         #ifdef WM_DEBUG_LEVEL
         DEBUG_WM(WM_DEBUG_ERROR,F("[ERROR] WiFiManagerParameter is out of scope"));
         #endif
-        return "";
+        return;
       }
     }
 
@@ -1782,25 +1774,25 @@ String WiFiManager::getParamOut(){
       // Input templating
       // "<br/><input id='{i}' name='{n}' maxlength='{l}' value='{v}' {c}>";
       // if no ID use customhtml for item, else generate from param string
+      // Although pitem is short, when the replacements are done it can get large, especially with custom HTML, so
+      // we use Page::replace() to do all of the replacement at the same time as sending in chunks.
       if (_params[i]->getID() != NULL) {
-        if(tok_I)pitem.replace(FPSTR(T_I), (String)FPSTR(S_parampre)+(String)i); // T_I id number
-        if(tok_i)pitem.replace(FPSTR(T_i), _params[i]->getID()); // T_i id name
-        if(tok_n)pitem.replace(FPSTR(T_n), _params[i]->getID()); // T_n id name alias
-        if(tok_p)pitem.replace(FPSTR(T_p), FPSTR(T_t)); // T_p replace legacy placeholder token
-        if(tok_t)pitem.replace(FPSTR(T_t), _params[i]->getLabel()); // T_t title/label
+        Page::ReplacementList replacements;
+        if(tok_I) replacements += Page::Replacement(FPSTR(T_I), (String)FPSTR(S_parampre)+(String)i); // T_I id number
+        if(tok_i) replacements += Page::Replacement(FPSTR(T_i), _params[i]->getID()); // T_i id name
+        if(tok_n) replacements += Page::Replacement(FPSTR(T_n), _params[i]->getID()); // T_n id name alias
+        if(tok_p) replacements += Page::Replacement(FPSTR(T_p), FPSTR(T_t)); // T_p replace legacy placeholder token
+        if(tok_t) replacements += Page::Replacement(FPSTR(T_t), _params[i]->getLabel()); // T_t title/label
         snprintf(valLength, 5, "%d", _params[i]->getValueLength());
-        if(tok_l)pitem.replace(FPSTR(T_l), valLength); // T_l value length
-        if(tok_v)pitem.replace(FPSTR(T_v), _params[i]->getValue()); // T_v value
-        if(tok_c)pitem.replace(FPSTR(T_c), _params[i]->getCustomHTML()); // T_c meant for additional attributes, not html, but can stuff
+        if(tok_l) replacements += Page::Replacement(FPSTR(T_l), valLength); // T_l value length
+        if(tok_v) replacements += Page::Replacement(FPSTR(T_v), _params[i]->getValue()); // T_v value
+        if(tok_c) replacements += Page::Replacement(FPSTR(T_c), _params[i]->getCustomHTML()); // T_c meant for additional attributes, not html, but can stuff
+        page.replace(pitem, replacements);
       } else {
-        pitem = _params[i]->getCustomHTML();
+        page += _params[i]->getCustomHTML();
       }
-
-      page += pitem;
     }
   }
-
-  return page;
 }
 
 void WiFiManager::handleWiFiStatus(){
@@ -1808,10 +1800,10 @@ void WiFiManager::handleWiFiStatus(){
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP WiFi status "));
   #endif
   handleRequest();
-  String page;
+  PAGE(page);
   // String page = "{\"result\":true,\"count\":1}";
   #ifdef WM_JSTEST
-    page = FPSTR(HTTP_JS);
+    page += FPSTR(HTTP_JS);
   #endif
   HTTPSend(page);
 }
@@ -1890,21 +1882,21 @@ void WiFiManager::handleWifiSave() {
 
   if(_paramsInWifi) doParamSave();
 
-  String page;
+  PAGE(page);
+  page.sendHeader(FPSTR(HTTP_HEAD_CORS), FPSTR(HTTP_HEAD_CORS_ALLOW_ALL)); // @HTTPHEAD send cors
 
   if(_ssid == ""){
-    page = getHTTPHead(FPSTR(S_titlewifisettings), FPSTR(C_wifi)); // @token titleparamsaved
+    sendHTTPHead(page, FPSTR(S_titlewifisettings), FPSTR(C_wifi)); // @token titleparamsaved
     page += FPSTR(HTTP_PARAMSAVED);
   }
   else {
-    page = getHTTPHead(FPSTR(S_titlewifisaved), FPSTR(C_wifi)); // @token titlewifisaved
+    sendHTTPHead(page, FPSTR(S_titlewifisaved), FPSTR(C_wifi)); // @token titlewifisaved
     page += FPSTR(HTTP_SAVED);
   }
 
   if(_showBack) page += FPSTR(HTTP_BACKBTN);
   page += getHTTPEnd();
 
-  server->sendHeader(FPSTR(HTTP_HEAD_CORS), FPSTR(HTTP_HEAD_CORS_ALLOW_ALL)); // @HTTPHEAD send cors
   HTTPSend(page);
 
   #ifdef WM_DEBUG_LEVEL
@@ -1926,7 +1918,8 @@ void WiFiManager::handleParamSave() {
 
   doParamSave();
 
-  String page = getHTTPHead(FPSTR(S_titleparamsaved), FPSTR(C_param)); // @token titleparamsaved
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titleparamsaved), FPSTR(C_param)); // @token titleparamsaved
   page += FPSTR(HTTP_PARAMSAVED);
   if(_showBack) page += FPSTR(HTTP_BACKBTN); 
   page += getHTTPEnd();
@@ -1992,7 +1985,8 @@ void WiFiManager::handleInfo() {
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP Info"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titleinfo), FPSTR(C_info)); // @token titleinfo
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titleinfo), FPSTR(C_info)); // @token titleinfo
   reportStatus(page);
 
   uint16_t infos = 0;
@@ -2326,6 +2320,7 @@ String WiFiManager::getInfoData(String id){
     p = FPSTR(HTTP_INFO_aboutdate);
     p.replace(FPSTR(T_1),String(__DATE__ " " __TIME__));
   }
+
   return p;
 }
 
@@ -2337,11 +2332,12 @@ void WiFiManager::handleExit() {
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP Exit"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titleexit), FPSTR(C_exit)); // @token titleexit
+  // ('Logout', 401, {'WWW-Authenticate': 'Basic realm="Login required"'})
+  PAGE(page);
+  page.sendHeader(F("Cache-Control"), F("no-cache, no-store, must-revalidate")); // @HTTPHEAD send cache
+  sendHTTPHead(page, FPSTR(S_titleexit), FPSTR(C_exit)); // @token titleexit
   page += FPSTR(S_exiting); // @token exiting
   page += getHTTPEnd();
-  // ('Logout', 401, {'WWW-Authenticate': 'Basic realm="Login required"'})
-  server->sendHeader(F("Cache-Control"), F("no-cache, no-store, must-revalidate")); // @HTTPHEAD send cache
   HTTPSend(page);
   delay(2000);
   abort = true;
@@ -2355,7 +2351,8 @@ void WiFiManager::handleReset() {
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP Reset"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titlereset), FPSTR(C_restart)); //@token titlereset
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titlereset), FPSTR(C_restart)); //@token titlereset
   page += FPSTR(S_resetting); //@token resetting
   page += getHTTPEnd();
 
@@ -2380,7 +2377,8 @@ void WiFiManager::handleErase(boolean opt) {
   DEBUG_WM(WM_DEBUG_NOTIFY,F("<- HTTP Erase"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titleerase), FPSTR(C_erase)); // @token titleerase
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titleerase), FPSTR(C_erase)); // @token titleerase
 
   bool ret = erase(opt);
 
@@ -2485,56 +2483,58 @@ void WiFiManager::handleClose(){
   DEBUG_WM(WM_DEBUG_VERBOSE,F("<- HTTP close"));
   #endif
   handleRequest();
-  String page = getHTTPHead(FPSTR(S_titleclose), FPSTR(C_close)); // @token titleclose
+  PAGE(page);
+  sendHTTPHead(page, FPSTR(S_titleclose), FPSTR(C_close)); // @token titleclose
   page += FPSTR(S_closing); // @token closing
   page += getHTTPEnd();
   HTTPSend(page);
 }
 
-void WiFiManager::reportStatus(String &page){
+void WiFiManager::reportStatus(Page& page){
   // updateConxResult(WiFi.status()); // @todo: this defeats the purpose of last result, update elsewhere or add logic here
   DEBUG_WM(WM_DEBUG_DEV,F("[WIFI] reportStatus prev:"),getWLStatusString(_lastconxresult));
   DEBUG_WM(WM_DEBUG_DEV,F("[WIFI] reportStatus current:"),getWLStatusString(WiFi.status()));
-  String str;
+
   if (WiFi_SSID() != ""){
     if (WiFi.status()==WL_CONNECTED){
-      str = FPSTR(HTTP_STATUS_ON);
-      str.replace(FPSTR(T_i),WiFi.localIP().toString());
-      str.replace(FPSTR(T_v),htmlEntities(WiFi_SSID()));
+      Page::ReplacementList replacements;
+      replacements += Page::Replacement(FPSTR(T_i), WiFi.localIP().toString());
+      replacements += Page::Replacement(FPSTR(T_v), htmlEntities(WiFi_SSID()));
+      page.replace(FPSTR(HTTP_STATUS_ON), replacements);
     }
     else {
-      str = FPSTR(HTTP_STATUS_OFF);
-      str.replace(FPSTR(T_v),htmlEntities(WiFi_SSID()));
+      Page::ReplacementList replacements;
+      replacements += Page::Replacement(FPSTR(T_v),htmlEntities(WiFi_SSID()));
       if(_lastconxresult == WL_STATION_WRONG_PASSWORD){
         // wrong password
-        str.replace(FPSTR(T_c),"D"); // class
-        str.replace(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFPW));
+        replacements += Page::Replacement(FPSTR(T_c),"D"); // class
+        replacements += Page::Replacement(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFPW));
       }
       else if(_lastconxresult == WL_NO_SSID_AVAIL){
         // connect failed, or ap not found
-        str.replace(FPSTR(T_c),"D");
-        str.replace(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFNOAP));
+        replacements += Page::Replacement(FPSTR(T_c),"D");
+        replacements += Page::Replacement(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFNOAP));
       }
       else if(_lastconxresult == WL_CONNECT_FAILED){
         // connect failed
-        str.replace(FPSTR(T_c),"D");
-        str.replace(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFFAIL));
+        replacements += Page::Replacement(FPSTR(T_c),"D");
+        replacements += Page::Replacement(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFFAIL));
       }
       else if(_lastconxresult == WL_CONNECTION_LOST){
         // connect failed, MOST likely 4WAY_HANDSHAKE_TIMEOUT/incorrect password, state is ambiguous however
-        str.replace(FPSTR(T_c),"D");
-        str.replace(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFFAIL));
+        replacements += Page::Replacement(FPSTR(T_c),"D");
+        replacements += Page::Replacement(FPSTR(T_r),FPSTR(HTTP_STATUS_OFFFAIL));
       }
       else{
-        str.replace(FPSTR(T_c),"");
-        str.replace(FPSTR(T_r),"");
+        replacements += Page::Replacement(FPSTR(T_c),"");
+        replacements += Page::Replacement(FPSTR(T_r),"");
       } 
+      page.replace(FPSTR(HTTP_STATUS_OFF), replacements);
     }
   }
   else {
-    str = FPSTR(HTTP_STATUS_NONE);
+    page += FPSTR(HTTP_STATUS_NONE);
   }
-  page += str;
 }
 
 // PUBLIC
@@ -3911,11 +3911,12 @@ void WiFiManager::handleUpdate() {
 	DEBUG_WM(WM_DEBUG_VERBOSE,F("<- Handle update"));
   #endif
 	if (captivePortal()) return; // If captive portal redirect instead of displaying the page
-	String page = getHTTPHead(_title, FPSTR(C_update)); // @token options
-	String str = FPSTR(HTTP_ROOT_MAIN);
-  str.replace(FPSTR(T_t), _title);
-	str.replace(FPSTR(T_v), configPortalActive ? _apName : (getWiFiHostname() + " - " + WiFi.localIP().toString())); // use ip if ap is not active for heading
-	page += str;
+	PAGE(page);
+  sendHTTPHead(page, _title, FPSTR(C_update)); // @token options
+  Page::ReplacementList replacements;
+  replacements += Page::Replacement(FPSTR(T_t), _title);
+  replacements += Page::Replacement(FPSTR(T_v), configPortalActive ? _apName : (getWiFiHostname() + " - " + WiFi.localIP().toString())); // use ip if ap is not active for heading
+  page.replace(FPSTR(HTTP_ROOT_MAIN), replacements);
 
 	page += FPSTR(HTTP_UPDATE);
 	page += getHTTPEnd();
@@ -4021,11 +4022,12 @@ void WiFiManager::handleUpdateDone() {
 	DEBUG_WM(WM_DEBUG_VERBOSE, F("<- Handle update done"));
 	// if (captivePortal()) return; // If captive portal redirect instead of displaying the page
 
-	String page = getHTTPHead(FPSTR(S_options), FPSTR(C_update)); // @token options
-	String str  = FPSTR(HTTP_ROOT_MAIN);
-  str.replace(FPSTR(T_t),_title);
-	str.replace(FPSTR(T_v), configPortalActive ? _apName : WiFi.localIP().toString()); // use ip if ap is not active for heading
-	page += str;
+	PAGE(page);
+  sendHTTPHead(page, FPSTR(S_options), FPSTR(C_update)); // @token options
+  Page::ReplacementList replacements;
+  replacements += Page::Replacement(FPSTR(T_t), &_title);
+  replacements += Page::Replacement(FPSTR(T_v), configPortalActive ? _apName : WiFi.localIP().toString()); // use ip if ap is not active for heading
+  page.replace(FPSTR(HTTP_ROOT_MAIN), replacements);
 
 	if (Update.hasError()) {
 		page += FPSTR(HTTP_UPDATE_FAIL);
@@ -4049,5 +4051,87 @@ void WiFiManager::handleUpdateDone() {
 		ESP.restart();
 	}
 }
+
+// In debug mode, all of the web server API calls that send anything are wrapped here with a debug message so that we can know exactly what is being
+// sent to the web server. Note that these messages require a debug level of WM_DEBUG_DEV.
+// If debug mode is disabled, there is no class WiFiManager::WM_WebServer and all of this code goes away.
+#ifdef WM_DEBUG_LEVEL
+void WiFiManager::WM_WebServer::send(uint16_t code, const String& contentType, const String& content) {
+  debug(WM_DEBUG_DEV, F("WM_WebServer::send(uint16_t code, const String& contentType, const String& content) content length:"), (String)content.length());
+  debug(WM_DEBUG_DEV, F(" code="), (String)code);
+  debug(WM_DEBUG_DEV, F(" contentType="), contentType);
+  debug(WM_DEBUG_DEV, F(" content="), content);
+
+  _WM_WebServer::send(code, contentType, content);
+}
+
+void WiFiManager::WM_WebServer::send_P(uint16_t code, PGM_P contentType, PGM_P content, size_t contentLength) {
+  debug(WM_DEBUG_DEV, F("WM_WebServer::send_P(uint16_t code, PGM_P contentType, PGM_P content, size_t contentLength) content length:"), (String)contentLength);
+  debug(WM_DEBUG_DEV, F(" code="), (String)code);
+  debug(WM_DEBUG_DEV, F(" contentType="), String(FPSTR(contentType)));
+  if (contentLength) {
+    assert(content);
+    assert(strlen_P(content) == contentLength);
+    debug(WM_DEBUG_DEV, F(" content="), String(FPSTR(content)));
+  }
+
+  _WM_WebServer::send_P(code, contentType, content, contentLength);
+}
+
+void WiFiManager::WM_WebServer::sendHeader(const String &name, const String &value, bool first) {
+  debug(WM_DEBUG_DEV,F("WM_WebServer::sendHeader(const String &name, const String &value, bool first) first="), (String)first);
+  debug(WM_DEBUG_DEV, F(" name="), name);
+  debug(WM_DEBUG_DEV, F(" value="), value);
+
+  _WM_WebServer::sendHeader(name, value, first);
+}
+
+void WiFiManager::WM_WebServer::sendContent(const char *content, size_t contentLength) {
+  debug(WM_DEBUG_DEV,F("WM_WebServer::sendContent(const char *content, size_t contentLength) content length:"), (String)contentLength);
+  if (contentLength) {
+    assert(content);
+    assert(strlen(content) == contentLength);
+    // Trying to print a long string can cause the subsequent sendContent() to fail when it otherwise would not,
+    // so we limit the printing of content to 100 characters.
+    String temp;
+    if (temp.reserve(100+3)) {
+      temp.concat(content, 100);
+      if (contentLength > 100)
+        temp += "...";
+      debug(WM_DEBUG_DEV, F(" content="), temp);
+    } else
+      debug(WM_DEBUG_DEV, F(" no string memory to show content"), emptyString);
+  }
+
+  _WM_WebServer::sendContent(content, contentLength);
+}
+
+void WiFiManager::WM_WebServer::sendContent(const String& content) {
+  debug(WM_DEBUG_DEV,F("WM_WebServer::sendContent(const String& content) content length:"), (String)content.length());
+  debug(WM_DEBUG_DEV, F(" content="), content);
+
+  _WM_WebServer::sendContent(content);
+}
+
+void WiFiManager::WM_WebServer::setContentLength(const size_t contentLength) {
+  debug(WM_DEBUG_DEV,F("WM_WebServer::setContentLength(const size_t contentLength) content length:"),
+    contentLength == CONTENT_LENGTH_UNKNOWN ? F("CONTENT_LENGTH_UNKNOWN") :
+    contentLength == CONTENT_LENGTH_NOT_SET ? F("CONTENT_LENGTH_NOT_SET") :
+    (String)contentLength
+  );
+
+  _WM_WebServer::setContentLength(contentLength);
+}
+
+#if ESP8266
+// The method chunkedResponseFinalize() is specific to ESP8266WebServer.
+void WiFiManager::WM_WebServer::chunkedResponseFinalize() {
+  debug(WM_DEBUG_DEV,F("WM_WebServer::chunkedResponseFinalize(void)"), emptyString);
+
+  _WM_WebServer::chunkedResponseFinalize();
+}
+#endif
+
+#endif // WM_DEBUG_LEVEL
 
 #endif

@@ -535,7 +535,7 @@ class WiFiManager
       void sendContent(const char *content, size_t contentLength);
       void sendContent(const String& content);
       void setContentLength(const size_t contentLength);
-      #if ESP8266
+      #ifdef ESP8266
       void chunkedResponseFinalize();
       #endif
       using _WM_WebServer::on, _WM_WebServer::onNotFound;

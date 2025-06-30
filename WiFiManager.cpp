@@ -4123,7 +4123,7 @@ void WiFiManager::WM_WebServer::setContentLength(const size_t contentLength) {
   _WM_WebServer::setContentLength(contentLength);
 }
 
-#if ESP8266
+#ifdef ESP8266
 // The method chunkedResponseFinalize() is specific to ESP8266WebServer.
 void WiFiManager::WM_WebServer::chunkedResponseFinalize() {
   debug(WM_DEBUG_DEV,F("WM_WebServer::chunkedResponseFinalize(void)"), emptyString);
